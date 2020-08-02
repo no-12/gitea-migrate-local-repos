@@ -64,6 +64,11 @@ migrate_local_repo() {
     local uid
     uid=$(find_uid "$owners_raw" "$owner")
 
+    if [[ -z "$uid" ]]; then
+        log_error "Unkown owner $owner"
+        return 1
+    fi
+
     log_info "Migrate '$repo_name' from '$repo_path' to owner '$owner (id: $uid)'"
     migrate_repo_api_request "$repo_path" "$repo_name" "$uid"
 }
