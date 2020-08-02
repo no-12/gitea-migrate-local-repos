@@ -1,0 +1,112 @@
+#!/bin/bash
+set -euo pipefail
+shopt -s nullglob
+
+declare GITEA_API_TOKEN=
+declare GITEA_BASE_URL=http://localhost:3000
+declare PATH_TO_MIGRATE=/data/git/repositories_to_migrate
+
+log_info() {
+    echo -e "\e[36m[INFO] $1\e[0m" 1>&2
+}
+
+log_error() {
+    echo -e "\e[31m[ERROR] $1\e[0m" 1>&2
+}
+
+get_owners_api_request() {
+    local type=$1
+    log_info "Get $type from gitea api"
+    curl --request GET \
+        --header "accept: application/json" \
+        --fail \
+        --silent \
+        --show-error \
+        "$GITEA_BASE_URL/api/v1/admin/$type?token=$GITEA_API_TOKEN"
+}
+
+migrate_repo_api_request() {
+    local clone_addr=$1
+    local repo_name=$2
+    local uid=$3
+    curl --request POST \
+        --header "accept: application/json" \
+        --header "Content-Type: application/json" \
+        --data "{ \"clone_addr\": \"$clone_addr\", \"private\": true, \"repo_name\": \"$repo_name\", \"uid\": $uid, \"wiki\": false}" \
+        --fail \
+        --silent \
+        --show-error \
+        "$GITEA_BASE_URL/api/v1/repos/migrate?token=$GITEA_API_TOKEN"
+}
+
+get_owners() {
+    get_owners_api_request users
+    get_owners_api_request orgs
+}
+
+find_uid() {
+    local owners_raw=$1
+    local owner=$2
+    echo "$owners_raw" |
+        grep -oE "[^\{]*username\":[[:space:]]*\"${owner}[^\}]*" |
+        grep -oE '"id":[[:space:]]*[0-9]+' |
+        grep -oE '[0-9]+'
+}
+
+migrate_local_repo() {
+    local repo_path=$1
+    local owners_raw=$2
+
+    local repo_name
+    repo_name=$(basename "$repo_path" | sed 's/.git//')
+    local owner
+    owner=$(basename -- "$(dirname -- "$repo_path")")
+    local uid
+    uid=$(find_uid "$owners_raw" "$owner")
+
+    log_info "Migrate '$repo_name' from '$repo_path' to owner '$owner (id: $uid)'"
+    migrate_repo_api_request "$repo_path" "$repo_name" "$uid"
+}
+
+print_usage() {
+    echo "Usage: $(basename "$0") -t TOKEN [-p PATH] [-u URL]
+    -t TOKEN      Gitea api token with admin permissions (mandatory)
+    -p PATH       Absolute path to git repos; All repos matching 'PATH/OWNER/REPO_NAME.git' will be migrated (default: /data/git/repositories_to_migrate)
+    -u URL        Gitea base url (default: http://localhost:3000)"
+}
+
+print_usage_with_error() {
+    log_error "$1"
+    print_usage
+    exit 1
+}
+
+get_opts() {
+    while getopts ":hp:t:u:" opt; do
+        case ${opt} in
+        h) print_usage && exit 0 ;;
+        p) PATH_TO_MIGRATE=$OPTARG ;;
+        t) GITEA_API_TOKEN=$OPTARG ;;
+        u) GITEA_BASE_URL=$OPTARG ;;
+        :) print_usage_with_error "Invalid Option: -$OPTARG requires an argument" ;;
+        \?) print_usage_with_error "Invalid Option: -$OPTARG" ;;
+        esac
+    done
+
+    if [[ -z "$GITEA_API_TOKEN" ]]; then
+        print_usage_with_error "Invalid Option: -t TOKEN is mandatory"
+    fi
+}
+
+main() {
+    get_opts "$@"
+
+    local owners_raw
+    owners_raw=$(get_owners)
+
+    for repo_path in "$PATH_TO_MIGRATE"/*/*.git; do
+        migrate_local_repo "$repo_path" "$owners_raw" || log_error "Unable to migrate $repo_path"
+    done
+}
+
+main "$@"
